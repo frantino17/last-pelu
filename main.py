@@ -542,7 +542,9 @@ class PeluqueriaVIPSimulator(QMainWindow):
             'refrigerios_entregados': refreshments_given,
             'costo_refrigerios': total_refreshments_cost,
             'ganancia_neta': total_revenue - total_refreshments_cost,
-            'info_cola': ''
+            'clientes': [],  # Lista para almacenar información de cada cliente
+            'espera_promedio': 0,
+            'clientes_con_refrigerio': 0
         }
         
         # Información específica del evento
@@ -584,18 +586,30 @@ class PeluqueriaVIPSimulator(QMainWindow):
             else:
                 record['veterano_b'] = estado
         
-        # Información de clientes en cola
-        clientes_en_cola = []
+        # Información detallada de cada cliente en cola
+        total_espera = 0
+        clientes_con_refrigerio = 0
+        
         for customer in waiting_queue:
             tiempo_espera = clock - customer['arrival_time']
-            refrigerio = "Sí" if customer['got_refreshment'] else "No"
-            hora_ref = customer.get('refrigerio_time', 'N/A')
-            if isinstance(hora_ref, float):
-                clientes_en_cola.append(f"C{customer['id']}(Esp:{tiempo_espera:.1f}, Ref:{refrigerio}, HoraRef:{hora_ref:.1f})")
-            else:
-                clientes_en_cola.append(f"C{customer['id']}(Esp:{tiempo_espera:.1f}, Ref:{refrigerio})")
+            total_espera += tiempo_espera
+            
+            cliente_info = {
+                'id': customer['id'],
+                'espera': f"{tiempo_espera:.1f}",
+                'refrigerio': "Sí" if customer['got_refreshment'] else "No",
+                'hora_ref': f"{customer.get('refrigerio_time', 'N/A'):.1f}" if isinstance(customer.get('refrigerio_time'), float) else str(customer.get('refrigerio_time', 'N/A'))
+            }
+            
+            if customer['got_refreshment']:
+                clientes_con_refrigerio += 1
+            
+            record['clientes'].append(cliente_info)
         
-        record['info_cola'] = ", ".join(clientes_en_cola) if clientes_en_cola else "Vacía"
+        # Calcular estadísticas de la cola
+        if len(waiting_queue) > 0:
+            record['espera_promedio'] = total_espera / len(waiting_queue)
+        record['clientes_con_refrigerio'] = clientes_con_refrigerio
         
         return record
     
@@ -608,7 +622,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
         headers = ['N° Evento', 'Reloj', 'Evento', 'RND Llegada', 'Tiempo Entre Llegadas', 
                    'Próxima Llegada', 'RND Peluquero', 'Peluquero Preferido', 'RND Servicio', 
                    'Tiempo Servicio', 'Aprendiz', 'Veterano A', 'Veterano B', 'Cola', 'Atendidos',
-                   'Recaudación', 'Refrigerios', 'Costo Ref', 'Ganancia Neta', 'Info Cola (ID, Espera, Refrigerio, HoraRef)']
+                   'Recaudación', 'Refrigerios', 'Costo Ref', 'Ganancia Neta', 
+                   'Cliente ID', 'Espera', 'Refrigerio', 'Hora Ref']
         
         self.events_table.setRowCount(len(filtered_events))
         self.events_table.setColumnCount(len(headers))
@@ -658,7 +673,19 @@ class PeluqueriaVIPSimulator(QMainWindow):
             self.events_table.setItem(row, 16, QTableWidgetItem(str(event['refrigerios_entregados'])))
             self.events_table.setItem(row, 17, QTableWidgetItem(f"${event['costo_refrigerios']:.2f}"))
             self.events_table.setItem(row, 18, QTableWidgetItem(f"${event['ganancia_neta']:.2f}"))
-            self.events_table.setItem(row, 19, QTableWidgetItem(event['info_cola']))
+            
+            # Información de clientes - mostrar solo el primer cliente para no hacer la tabla demasiado ancha
+            if event['clientes']:
+                primer_cliente = event['clientes'][0]
+                self.events_table.setItem(row, 19, QTableWidgetItem(f"C{primer_cliente['id']}"))
+                self.events_table.setItem(row, 20, QTableWidgetItem(primer_cliente['espera']))
+                self.events_table.setItem(row, 21, QTableWidgetItem(primer_cliente['refrigerio']))
+                self.events_table.setItem(row, 22, QTableWidgetItem(primer_cliente['hora_ref']))
+            else:
+                self.events_table.setItem(row, 19, QTableWidgetItem(""))
+                self.events_table.setItem(row, 20, QTableWidgetItem(""))
+                self.events_table.setItem(row, 21, QTableWidgetItem(""))
+                self.events_table.setItem(row, 22, QTableWidgetItem(""))
         
         # Ajustar tamaño de columnas
         header = self.events_table.horizontalHeader()
@@ -878,9 +905,20 @@ Horario de Atención:
                         'Recaudación': format_value(event['recaudacion'], 2),
                         'Refrigerios': event['refrigerios_entregados'],
                         'Costo Ref': format_value(event['costo_refrigerios'], 2),
-                        'Ganancia Neta': format_value(event['ganancia_neta'], 2),
-                        'Info Cola': event['info_cola'] if event['info_cola'] else ''
+                        'Ganancia Neta': format_value(event['ganancia_neta'], 2)
                     }
+                    
+                    # Agregar información de clientes (hasta 5 clientes para no hacer la tabla demasiado ancha)
+                    for i, cliente in enumerate(event['clientes'][:5]):
+                        row_data[f'Cliente {i+1} ID'] = f"C{cliente['id']}"
+                        row_data[f'Cliente {i+1} Espera'] = cliente['espera']
+                        row_data[f'Cliente {i+1} Refrigerio'] = cliente['refrigerio']
+                        row_data[f'Cliente {i+1} Hora Ref'] = cliente['hora_ref']
+                    
+                    # Si hay más de 5 clientes, agregar un campo para indicarlo
+                    if len(event['clientes']) > 5:
+                        row_data['Clientes Adicionales'] = f"+{len(event['clientes']) - 5} clientes más"
+                    
                     events_data.append(row_data)
                 
                 df_events = pd.DataFrame(events_data)
