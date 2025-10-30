@@ -1,11 +1,14 @@
 import sys
 import random
 import numpy as np
+import pandas as pd
+from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                              QTableWidget, QTableWidgetItem, QTabWidget,
                              QTextEdit, QGroupBox, QSpinBox, QDoubleSpinBox,
-                             QHeaderView, QMessageBox, QCheckBox, QGridLayout)
+                             QHeaderView, QMessageBox, QCheckBox, QGridLayout,
+                             QFileDialog)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 
@@ -14,6 +17,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
         super().__init__()
         self.initUI()
         self.simulation_data = []
+        self.last_simulation_results = None  # Para guardar los resultados
+        self.last_simulation_params = None   # Para guardar los parámetros
         
     def initUI(self):
         self.setWindowTitle('Simulación de Peluquería VIP - Eventos Discretos (CORREGIDA)')
@@ -156,6 +161,11 @@ class PeluqueriaVIPSimulator(QMainWindow):
         self.simulate_button.clicked.connect(self.run_simulation)
         sim_layout.addWidget(self.simulate_button)
         
+        self.export_button = QPushButton("Exportar a Excel")
+        self.export_button.clicked.connect(self.export_to_excel)
+        self.export_button.setEnabled(False)
+        sim_layout.addWidget(self.export_button)
+        
         sim_group.setLayout(sim_layout)
         layout.addWidget(sim_group)
         
@@ -215,6 +225,18 @@ class PeluqueriaVIPSimulator(QMainWindow):
             # Calcular estadísticas finales
             self.display_final_results(daily_results, n_days, params)
             
+            # Guardar resultados para exportar
+            self.last_simulation_results = {
+                'daily_results': daily_results,
+                'n_days': n_days,
+                'first_day_events': daily_results[0]['events_log'] if daily_results else [],
+                'params': params,
+                'start_event': start_event,
+                'iterations': iterations
+            }
+            self.last_simulation_params = params
+            self.export_button.setEnabled(True)
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Ocurrió un error: {str(e)}\n\n{str(type(e).__name__)}")
     
@@ -251,20 +273,26 @@ class PeluqueriaVIPSimulator(QMainWindow):
         
         # ===== EVENTO INICIAL =====
         event_counter += 1
-        init_event = {'type': 'INICIO', 'time': 0, 'event_num': event_counter}
+        
+        # Generar primera llegada en la fila de INICIO
+        rnd_llegada_inicial = random.random()
+        tiempo_primera_llegada = params['llegada_min'] + (params['llegada_max'] - params['llegada_min']) * rnd_llegada_inicial
+        next_arrival_time = clock + tiempo_primera_llegada
+        
+        init_event = {'type': 'INICIO', 'time': 0, 'event_num': event_counter, 
+                     'rnd_llegada': rnd_llegada_inicial, 'proxima_llegada': next_arrival_time}
         init_record = self.record_event(clock, init_event, barbers, waiting_queue, 
                                       served_customers, total_revenue, 
                                       refreshments_given, total_refreshments_cost, 
-                                      all_customers, params, None)
+                                      all_customers, params, 
+                                      {'rnd_llegada': rnd_llegada_inicial, 'proxima_llegada': next_arrival_time})
         events_log.append(init_record)
         
-        # Generar primera llegada
-        rnd_llegada = random.random()
-        next_arrival_time = clock + params['llegada_min'] + (params['llegada_max'] - params['llegada_min']) * rnd_llegada
-        
+        # Programar primera llegada
+        event_counter += 1
         future_events = [
             {'type': 'LLEGADA', 'time': next_arrival_time, 'customer_id': 1, 
-             'rnd_llegada': rnd_llegada, 'event_num': event_counter + 1}
+             'rnd_llegada': rnd_llegada_inicial, 'event_num': event_counter}
         ]
         
         # Bucle principal de simulación
@@ -316,6 +344,28 @@ class PeluqueriaVIPSimulator(QMainWindow):
                 
                 all_customers[customer_id] = customer
                 
+                # Calcular tiempo entre llegadas
+                if customer_id > 1:
+                    tiempo_entre_llegadas = clock - all_customers[customer_id-1]['arrival_time']
+                else:
+                    tiempo_entre_llegadas = clock  # Para el primer cliente
+                
+                # Programar próxima llegada ANTES de registrar el evento
+                proxima_llegada = None
+                if clock < end_time:
+                    customer_counter += 1
+                    event_counter += 1
+                    rnd_llegada = random.random()
+                    tiempo_entre_llegadas_futuro = params['llegada_min'] + (params['llegada_max'] - params['llegada_min']) * rnd_llegada
+                    proxima_llegada = clock + tiempo_entre_llegadas_futuro
+                    future_events.append({
+                        'type': 'LLEGADA',
+                        'time': proxima_llegada,
+                        'customer_id': customer_counter,
+                        'rnd_llegada': rnd_llegada,
+                        'event_num': event_counter
+                    })
+                
                 # Verificar si el peluquero preferido está libre
                 if not barbers[preferred_barber]['busy']:
                     # Atender inmediatamente
@@ -326,7 +376,6 @@ class PeluqueriaVIPSimulator(QMainWindow):
                     waiting_queue.append(customer)
                     
                     # PROGRAMAR EVENTO DE REFRIGERIO para este cliente
-                    # Hora refrigerio = hora llegada + tiempo límite refrigerio
                     event_counter += 1
                     refrigerio_time = clock + params['tiempo_refrigerio']
                     customer['refrigerio_time'] = refrigerio_time
@@ -339,30 +388,21 @@ class PeluqueriaVIPSimulator(QMainWindow):
                         'event_num': event_counter
                     })
                 
-                # Registrar evento
-                eventos_adicionales = {'rnd_llegada': next_event['rnd_llegada'], 
-                                     'rnd_peluquero': rnd_peluquero,
-                                     'peluquero_preferido': barbers[preferred_barber]['name']}
+                # Registrar evento con la información COMPLETA de la próxima llegada
+                eventos_adicionales = {
+                    'rnd_llegada': next_event['rnd_llegada'],
+                    'rnd_peluquero': rnd_peluquero,
+                    'peluquero_preferido': barbers[preferred_barber]['name'],
+                    'tiempo_entre_llegadas': tiempo_entre_llegadas,
+                    'proxima_llegada': proxima_llegada
+                }
+                
                 if day_num == 0:
                     event_record = self.record_event(clock, next_event, barbers, waiting_queue, 
                                                    served_customers, total_revenue, 
                                                    refreshments_given, total_refreshments_cost,
                                                    all_customers, params, eventos_adicionales)
                     events_log.append(event_record)
-                
-                # Programar próxima llegada si estamos en horario
-                if clock < end_time:
-                    customer_counter += 1
-                    event_counter += 1
-                    rnd_llegada = random.random()
-                    next_arrival = clock + params['llegada_min'] + (params['llegada_max'] - params['llegada_min']) * rnd_llegada
-                    future_events.append({
-                        'type': 'LLEGADA',
-                        'time': next_arrival,
-                        'customer_id': customer_counter,
-                        'rnd_llegada': rnd_llegada,
-                        'event_num': event_counter
-                    })
             
             elif next_event['type'] == 'FIN_SERVICIO':
                 barber_index = next_event['barber_index']
@@ -477,11 +517,6 @@ class PeluqueriaVIPSimulator(QMainWindow):
             'customer_id': customer['id'],
             'event_num': event_counter
         })
-        
-        # Cancelar evento de refrigerio si ya estaba programado y no se dio
-        # (El cliente fue atendido antes de que llegue su hora de refrigerio)
-        # No hacemos nada aquí, el evento de refrigerio verificará si el cliente
-        # sigue en cola cuando se ejecute
     
     def record_event(self, clock, event, barbers, waiting_queue, served_customers, 
                     total_revenue, refreshments_given, total_refreshments_cost,
@@ -506,32 +541,38 @@ class PeluqueriaVIPSimulator(QMainWindow):
             'recaudacion': total_revenue,
             'refrigerios_entregados': refreshments_given,
             'costo_refrigerios': total_refreshments_cost,
-            'ganancia_neta': total_revenue - total_refreshments_cost
+            'ganancia_neta': total_revenue - total_refreshments_cost,
+            'info_cola': ''
         }
         
         # Información específica del evento
-        if event['type'] == 'LLEGADA' and eventos_adicionales:
-            record['rnd_llegada'] = eventos_adicionales.get('rnd_llegada', '')
-            record['rnd_peluquero'] = eventos_adicionales.get('rnd_peluquero', '')
+        if event['type'] == 'INICIO' and eventos_adicionales:
+            record['rnd_llegada'] = f"{eventos_adicionales.get('rnd_llegada', ''):.4f}" if eventos_adicionales.get('rnd_llegada') else ''
+            record['proxima_llegada'] = f"{eventos_adicionales.get('proxima_llegada', ''):.2f}" if eventos_adicionales.get('proxima_llegada') else ''
+            record['tiempo_entre_llegadas'] = ''  # En INICIO no hay tiempo entre llegadas
+        
+        elif event['type'] == 'LLEGADA' and eventos_adicionales:
+            record['rnd_llegada'] = f"{eventos_adicionales.get('rnd_llegada', ''):.4f}" if eventos_adicionales.get('rnd_llegada') else ''
+            record['tiempo_entre_llegadas'] = f"{eventos_adicionales.get('tiempo_entre_llegadas', ''):.2f}" if eventos_adicionales.get('tiempo_entre_llegadas') else ''
+            record['proxima_llegada'] = f"{eventos_adicionales.get('proxima_llegada', ''):.2f}" if eventos_adicionales.get('proxima_llegada') else ''
+            record['rnd_peluquero'] = f"{eventos_adicionales.get('rnd_peluquero', ''):.4f}" if eventos_adicionales.get('rnd_peluquero') else ''
             record['peluquero_preferido'] = eventos_adicionales.get('peluquero_preferido', '')
-            
-            # Calcular próxima llegada
-            for future_event in [e for e in [] if 'LLEGADA' in str(e)]:
-                if future_event.get('type') == 'LLEGADA':
-                    record['proxima_llegada'] = future_event['time']
-                    break
         
         elif event['type'] == 'FIN_SERVICIO' and eventos_adicionales:
             customer_id = eventos_adicionales.get('cliente_atendido')
             if customer_id and customer_id in all_customers:
                 customer = all_customers[customer_id]
-                record['rnd_servicio'] = customer.get('rnd_servicio', '')
-                record['tiempo_servicio'] = customer.get('service_time', '')
+                record['rnd_servicio'] = f"{customer.get('rnd_servicio', ''):.4f}" if customer.get('rnd_servicio') else ''
+                record['tiempo_servicio'] = f"{customer.get('service_time', ''):.2f}" if customer.get('service_time') else ''
+        
+        elif event['type'] == 'REFRIGERIO' and eventos_adicionales:
+            # Para eventos de refrigerio, no hay información de llegadas
+            pass
         
         # Estado de peluqueros
         for i, barber in enumerate(barbers):
             if barber['busy']:
-                tiempo_restante = barber['service_end'] - clock
+                tiempo_restante = barber['service_end'] - clock if barber['service_end'] else 0
                 estado = f"Ocupado (C{barber['customer']['id']}, T:{tiempo_restante:.1f})"
             else:
                 estado = "Libre"
@@ -564,9 +605,9 @@ class PeluqueriaVIPSimulator(QMainWindow):
         end_event = min(start_event + iterations - 1, len(events_log))
         filtered_events = events_log[start_event-1:end_event]
         
-        headers = ['N° Evento', 'Reloj', 'Evento', 'RND Llegada', 'RND Peluquero', 
-                   'Peluquero Preferido', 'RND Servicio', 'Tiempo Servicio',
-                   'Aprendiz', 'Veterano A', 'Veterano B', 'Cola', 'Atendidos',
+        headers = ['N° Evento', 'Reloj', 'Evento', 'RND Llegada', 'Tiempo Entre Llegadas', 
+                   'Próxima Llegada', 'RND Peluquero', 'Peluquero Preferido', 'RND Servicio', 
+                   'Tiempo Servicio', 'Aprendiz', 'Veterano A', 'Veterano B', 'Cola', 'Atendidos',
                    'Recaudación', 'Refrigerios', 'Costo Ref', 'Ganancia Neta', 'Info Cola (ID, Espera, Refrigerio, HoraRef)']
         
         self.events_table.setRowCount(len(filtered_events))
@@ -580,36 +621,44 @@ class PeluqueriaVIPSimulator(QMainWindow):
             
             # RND Llegada
             val = event['rnd_llegada']
-            self.events_table.setItem(row, 3, QTableWidgetItem(f"{val:.4f}" if isinstance(val, float) else ''))
+            self.events_table.setItem(row, 3, QTableWidgetItem(str(val)))
+            
+            # Tiempo Entre Llegadas
+            val = event['tiempo_entre_llegadas']
+            self.events_table.setItem(row, 4, QTableWidgetItem(str(val)))
+            
+            # Próxima Llegada
+            val = event['proxima_llegada']
+            self.events_table.setItem(row, 5, QTableWidgetItem(str(val)))
             
             # RND Peluquero
             val = event['rnd_peluquero']
-            self.events_table.setItem(row, 4, QTableWidgetItem(f"{val:.4f}" if isinstance(val, float) else ''))
+            self.events_table.setItem(row, 6, QTableWidgetItem(str(val)))
             
             # Peluquero Preferido
-            self.events_table.setItem(row, 5, QTableWidgetItem(str(event['peluquero_preferido'])))
+            self.events_table.setItem(row, 7, QTableWidgetItem(str(event['peluquero_preferido'])))
             
             # RND Servicio
             val = event['rnd_servicio']
-            self.events_table.setItem(row, 6, QTableWidgetItem(f"{val:.4f}" if isinstance(val, float) else ''))
+            self.events_table.setItem(row, 8, QTableWidgetItem(str(val)))
             
             # Tiempo Servicio
             val = event['tiempo_servicio']
-            self.events_table.setItem(row, 7, QTableWidgetItem(f"{val:.2f}" if isinstance(val, float) else ''))
+            self.events_table.setItem(row, 9, QTableWidgetItem(str(val)))
             
             # Estados de peluqueros
-            self.events_table.setItem(row, 8, QTableWidgetItem(str(event['aprendiz'])))
-            self.events_table.setItem(row, 9, QTableWidgetItem(str(event['veterano_a'])))
-            self.events_table.setItem(row, 10, QTableWidgetItem(str(event['veterano_b'])))
+            self.events_table.setItem(row, 10, QTableWidgetItem(str(event['aprendiz'])))
+            self.events_table.setItem(row, 11, QTableWidgetItem(str(event['veterano_a'])))
+            self.events_table.setItem(row, 12, QTableWidgetItem(str(event['veterano_b'])))
             
             # Estadísticas
-            self.events_table.setItem(row, 11, QTableWidgetItem(str(event['cola_espera'])))
-            self.events_table.setItem(row, 12, QTableWidgetItem(str(event['clientes_atendidos'])))
-            self.events_table.setItem(row, 13, QTableWidgetItem(f"${event['recaudacion']:.2f}"))
-            self.events_table.setItem(row, 14, QTableWidgetItem(str(event['refrigerios_entregados'])))
-            self.events_table.setItem(row, 15, QTableWidgetItem(f"${event['costo_refrigerios']:.2f}"))
-            self.events_table.setItem(row, 16, QTableWidgetItem(f"${event['ganancia_neta']:.2f}"))
-            self.events_table.setItem(row, 17, QTableWidgetItem(event['info_cola']))
+            self.events_table.setItem(row, 13, QTableWidgetItem(str(event['cola_espera'])))
+            self.events_table.setItem(row, 14, QTableWidgetItem(str(event['clientes_atendidos'])))
+            self.events_table.setItem(row, 15, QTableWidgetItem(f"${event['recaudacion']:.2f}"))
+            self.events_table.setItem(row, 16, QTableWidgetItem(str(event['refrigerios_entregados'])))
+            self.events_table.setItem(row, 17, QTableWidgetItem(f"${event['costo_refrigerios']:.2f}"))
+            self.events_table.setItem(row, 18, QTableWidgetItem(f"${event['ganancia_neta']:.2f}"))
+            self.events_table.setItem(row, 19, QTableWidgetItem(event['info_cola']))
         
         # Ajustar tamaño de columnas
         header = self.events_table.horizontalHeader()
@@ -775,6 +824,222 @@ Horario de Atención:
         results_text += "\n" + "═" * 75 + "\n"
         
         self.results_text.setText(results_text)
+    
+    def export_to_excel(self):
+        """Exporta los resultados de la simulación a Excel"""
+        if not self.last_simulation_results:
+            QMessageBox.warning(self, "Advertencia", "Primero debe ejecutar una simulación")
+            return
+        
+        try:
+            # Abrir diálogo para guardar archivo
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_filename = f"simulacion_peluqueria_{timestamp}.xlsx"
+            
+            filename, _ = QFileDialog.getSaveFileName(
+                self,
+                "Guardar simulación en Excel",
+                default_filename,
+                "Excel Files (*.xlsx);;All Files (*)"
+            )
+            
+            if not filename:
+                return  # Usuario canceló
+            
+            # Crear Excel con pandas
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                # Hoja 1: Vector de Estado (eventos del primer día)
+                events_data = []
+                for event in self.last_simulation_results['first_day_events']:
+                    # Función auxiliar para formatear valores
+                    def format_value(val, decimals=2):
+                        if val == '' or val is None:
+                            return ''
+                        if isinstance(val, (int, float)):
+                            return round(val, decimals)
+                        return val
+                    
+                    row_data = {
+                        'N° Evento': event['evento_num'],
+                        'Reloj': format_value(event['reloj'], 2),
+                        'Evento': event['evento'],
+                        'RND Llegada': event['rnd_llegada'],
+                        'Tiempo Entre Llegadas': event['tiempo_entre_llegadas'],
+                        'Próxima Llegada': event['proxima_llegada'],
+                        'RND Peluquero': event['rnd_peluquero'],
+                        'Peluquero Preferido': event['peluquero_preferido'] if event['peluquero_preferido'] else '',
+                        'RND Servicio': event['rnd_servicio'],
+                        'Tiempo Servicio': event['tiempo_servicio'],
+                        'Aprendiz': event['aprendiz'] if event['aprendiz'] else '',
+                        'Veterano A': event['veterano_a'] if event['veterano_a'] else '',
+                        'Veterano B': event['veterano_b'] if event['veterano_b'] else '',
+                        'Cola': event['cola_espera'],
+                        'Atendidos': event['clientes_atendidos'],
+                        'Recaudación': format_value(event['recaudacion'], 2),
+                        'Refrigerios': event['refrigerios_entregados'],
+                        'Costo Ref': format_value(event['costo_refrigerios'], 2),
+                        'Ganancia Neta': format_value(event['ganancia_neta'], 2),
+                        'Info Cola': event['info_cola'] if event['info_cola'] else ''
+                    }
+                    events_data.append(row_data)
+                
+                df_events = pd.DataFrame(events_data)
+                df_events.to_excel(writer, sheet_name='Vector de Estado', index=False)
+                
+                # Hoja 2: Resumen por día
+                daily_data = []
+                for i, day in enumerate(self.last_simulation_results['daily_results']):
+                    daily_data.append({
+                        'Día': i + 1,
+                        'Recaudación': round(day['total_revenue'], 2),
+                        'Costo Refrigerios': round(day['refreshments_cost'], 2),
+                        'Ganancia Neta': round(day['total_revenue'] - day['refreshments_cost'], 2),
+                        'Clientes Atendidos': day['customers_served'],
+                        'Refrigerios Entregados': day['refreshments_given'],
+                        'Max Clientes Esperando': day['max_waiting_clients'],
+                        'Servicios Aprendiz': day['barbers_stats'][0],
+                        'Servicios Veterano A': day['barbers_stats'][1],
+                        'Servicios Veterano B': day['barbers_stats'][2]
+                    })
+                
+                df_daily = pd.DataFrame(daily_data)
+                df_daily.to_excel(writer, sheet_name='Resumen Diario', index=False)
+                
+                # Hoja 3: Estadísticas Finales
+                params = self.last_simulation_results['params']
+                daily_results = self.last_simulation_results['daily_results']
+                n_days = self.last_simulation_results['n_days']
+                
+                daily_revenues = [day['total_revenue'] for day in daily_results]
+                refreshments_per_day = [day['refreshments_given'] for day in daily_results]
+                max_clients = [day['max_waiting_clients'] for day in daily_results]
+                daily_net_profit = [day['total_revenue'] - day['refreshments_cost'] for day in daily_results]
+                
+                stats_data = {
+                    'Métrica': [
+                        'Días Simulados',
+                        'Promedio Recaudación Diaria',
+                        'Desv. Std. Recaudación',
+                        'Recaudación Mínima',
+                        'Recaudación Máxima',
+                        '',
+                        'Promedio Ganancia Neta Diaria',
+                        'Desv. Std. Ganancia Neta',
+                        'Ganancia Neta Mínima',
+                        'Ganancia Neta Máxima',
+                        '',
+                        'Sillas Necesarias',
+                        'Probabilidad 5+ Refrigerios',
+                        'Días con 5+ Refrigerios',
+                        '',
+                        'Total Clientes Atendidos',
+                        'Promedio Clientes por Día',
+                        'Total Refrigerios Entregados',
+                        'Promedio Refrigerios por Día',
+                        '',
+                        'Servicios Promedio Aprendiz/Día',
+                        'Servicios Promedio Veterano A/Día',
+                        'Servicios Promedio Veterano B/Día'
+                    ],
+                    'Valor': [
+                        n_days,
+                        f"${np.mean(daily_revenues):,.2f}",
+                        f"${np.std(daily_revenues):,.2f}",
+                        f"${min(daily_revenues):,.2f}",
+                        f"${max(daily_revenues):,.2f}",
+                        '',
+                        f"${np.mean(daily_net_profit):,.2f}",
+                        f"${np.std(daily_net_profit):,.2f}",
+                        f"${min(daily_net_profit):,.2f}",
+                        f"${max(daily_net_profit):,.2f}",
+                        '',
+                        max(max_clients),
+                        f"{sum(1 for r in refreshments_per_day if r >= 5) / n_days:.4f}",
+                        sum(1 for r in refreshments_per_day if r >= 5),
+                        '',
+                        sum(day['customers_served'] for day in daily_results),
+                        f"{sum(day['customers_served'] for day in daily_results) / n_days:.2f}",
+                        sum(refreshments_per_day),
+                        f"{sum(refreshments_per_day) / n_days:.2f}",
+                        '',
+                        f"{np.mean([day['barbers_stats'][0] for day in daily_results]):.2f}",
+                        f"{np.mean([day['barbers_stats'][1] for day in daily_results]):.2f}",
+                        f"{np.mean([day['barbers_stats'][2] for day in daily_results]):.2f}"
+                    ]
+                }
+                
+                df_stats = pd.DataFrame(stats_data)
+                df_stats.to_excel(writer, sheet_name='Estadísticas Finales', index=False)
+                
+                # Hoja 4: Parámetros de Simulación
+                params_data = {
+                    'Parámetro': [
+                        'Aprendiz - Tiempo Min (min)',
+                        'Aprendiz - Tiempo Max (min)',
+                        'Veterano A - Tiempo Min (min)',
+                        'Veterano A - Tiempo Max (min)',
+                        'Veterano B - Tiempo Min (min)',
+                        'Veterano B - Tiempo Max (min)',
+                        '',
+                        'Llegadas - Tiempo Min (min)',
+                        'Llegadas - Tiempo Max (min)',
+                        '',
+                        '% Preferencia Aprendiz',
+                        '% Preferencia Veterano A',
+                        '% Preferencia Veterano B',
+                        '',
+                        'Precio Aprendiz',
+                        'Precio Veteranos',
+                        'Costo Refrigerio',
+                        'Tiempo Límite Refrigerio (min)',
+                        'Horas de Atención'
+                    ],
+                    'Valor': [
+                        params['aprendiz_min'],
+                        params['aprendiz_max'],
+                        params['vetA_min'],
+                        params['vetA_max'],
+                        params['vetB_min'],
+                        params['vetB_max'],
+                        '',
+                        params['llegada_min'],
+                        params['llegada_max'],
+                        '',
+                        f"{params['porc_aprendiz']*100:.0f}%",
+                        f"{params['porc_vetA']*100:.0f}%",
+                        f"{params['porc_vetB']*100:.0f}%",
+                        '',
+                        f"${params['precio_aprendiz']:,.2f}",
+                        f"${params['precio_veteranos']:,.2f}",
+                        f"${params['costo_refrigerio']:,.2f}",
+                        params['tiempo_refrigerio'],
+                        params['horas_atencion']
+                    ]
+                }
+                
+                df_params = pd.DataFrame(params_data)
+                df_params.to_excel(writer, sheet_name='Parámetros', index=False)
+                
+                # Ajustar ancho de columnas
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    for column in worksheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        worksheet.column_dimensions[column_letter].width = adjusted_width
+            
+            QMessageBox.information(self, "Éxito", f"Simulación exportada exitosamente a:\n{filename}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error al exportar a Excel:\n{str(e)}\n\n{str(type(e).__name__)}")
+
 
 def main():
     app = QApplication(sys.argv)
