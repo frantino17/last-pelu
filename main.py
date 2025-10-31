@@ -549,7 +549,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
             'ganancia_neta': total_revenue - total_refreshments_cost,
             'clientes': [],  # Lista para almacenar información de cada cliente
             'espera_promedio': 0,
-            'clientes_con_refrigerio': 0
+            'clientes_con_refrigerio': 0,
+            'cliente_refrigerio_id': None  # ID del cliente que recibe refrigerio en este evento
         }
         
         # Información específica del evento
@@ -573,8 +574,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
                 record['tiempo_servicio'] = f"{customer.get('service_time', ''):.2f}" if customer.get('service_time') else ''
         
         elif event['type'] == 'REFRIGERIO' and eventos_adicionales:
-            # Para eventos de refrigerio, no hay información de llegadas
-            pass
+            # Guardar el ID del cliente que recibe refrigerio en este evento
+            record['cliente_refrigerio_id'] = eventos_adicionales.get('cliente_refrigerio')
         
         # Estado de peluqueros
         for i, barber in enumerate(barbers):
@@ -938,7 +939,10 @@ Horario de Atención:
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                 # Hoja 1: Vector de Estado (eventos del primer día)
                 events_data = []
+                iteracion = 0
                 for event in self.last_simulation_results['first_day_events']:
+                    iteracion += 1
+                    
                     # Función auxiliar para formatear valores
                     def format_value(val, decimals=2):
                         if val == '' or val is None:
@@ -948,7 +952,7 @@ Horario de Atención:
                         return val
                     
                     row_data = {
-                        'N° Evento': event['evento_num'],
+                        'N° Iteración': iteracion,
                         'Reloj': format_value(event['reloj'], 2),
                         'Evento': event['evento'],
                         'RND Llegada': event['rnd_llegada'],
@@ -983,16 +987,24 @@ Horario de Atención:
                     # Ordenar por ID para asignar columnas de forma consistente
                     clientes_ordenados = sorted(clientes_dict.values(), key=lambda x: x['id'])
                     
+                    # Obtener el ID del cliente que recibe refrigerio en este evento específico
+                    cliente_refrigerio_id = event.get('cliente_refrigerio_id', None)
+                    
                     # Agregar información de hasta 10 clientes en columnas fijas
                     # Cada cliente ocupa la siguiente columna disponible
                     for col_num in range(1, 11):
                         if col_num - 1 < len(clientes_ordenados):
                             cliente = clientes_ordenados[col_num - 1]
+                            cliente_id = cliente['id']
+                            
+                            # Mostrar "Sí" solo en el evento REFRIGERIO para el cliente específico
+                            refrigerio_value = "Sí" if (cliente_refrigerio_id is not None and cliente_id == cliente_refrigerio_id) else "No"
+                            
                             row_data[f'Cliente {col_num} ID'] = f"C{cliente['id']}"
                             row_data[f'Cliente {col_num} Estado'] = cliente['estado']
                             row_data[f'Cliente {col_num} Peluquero'] = cliente['peluquero_esperando']
                             row_data[f'Cliente {col_num} Hora Refrigerio'] = cliente['hora_ref']
-                            row_data[f'Cliente {col_num} Refrigerio'] = cliente['refrigerio']
+                            row_data[f'Cliente {col_num} Refrigerio'] = refrigerio_value
                         else:
                             # Columna vacía (no hay más clientes)
                             row_data[f'Cliente {col_num} ID'] = ''
