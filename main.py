@@ -369,7 +369,7 @@ class PeluqueriaVIPSimulator(QMainWindow):
                 # Verificar si el peluquero preferido está libre
                 if not barbers[preferred_barber]['busy']:
                     # Atender inmediatamente
-                    self.start_service(customer, preferred_barber, clock, barbers, 
+                    event_counter = self.start_service(customer, preferred_barber, clock, barbers, 
                                      future_events, params, event_counter)
                 else:
                     # Agregar a cola de espera
@@ -415,10 +415,25 @@ class PeluqueriaVIPSimulator(QMainWindow):
                 barbers[barber_index]['servicios_completados'] += 1
                 served_customers.append(customer.copy())
                 
-                # Liberar peluquero
+                # IMPORTANTE: Registrar evento ANTES de liberar al peluquero
+                # Así el cliente que termina NO aparecerá en las columnas de clientes
+                eventos_adicionales = {
+                    'cliente_atendido': customer_id,
+                    'peluquero': barbers[barber_index]['name'],
+                    'precio_cobrado': barbers[barber_index]['price']
+                }
+                
+                # Liberar peluquero ANTES de registrar el evento
                 barbers[barber_index]['busy'] = False
                 barbers[barber_index]['service_end'] = None
                 barbers[barber_index]['customer'] = None
+                
+                if day_num == 0:
+                    event_record = self.record_event(clock, next_event, barbers, waiting_queue, 
+                                                   served_customers, total_revenue, 
+                                                   refreshments_given, total_refreshments_cost,
+                                                   all_customers, params, eventos_adicionales)
+                    events_log.append(event_record)
                 
                 # Buscar próximo cliente en la cola que prefiera este peluquero
                 next_customer = None
@@ -429,21 +444,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
                 
                 if next_customer:
                     # Atender siguiente cliente
-                    self.start_service(next_customer, barber_index, clock, barbers, 
+                    event_counter = self.start_service(next_customer, barber_index, clock, barbers, 
                                      future_events, params, event_counter)
-                
-                # Registrar evento
-                eventos_adicionales = {
-                    'cliente_atendido': customer_id,
-                    'peluquero': barbers[barber_index]['name'],
-                    'precio_cobrado': barbers[barber_index]['price']
-                }
-                if day_num == 0:
-                    event_record = self.record_event(clock, next_event, barbers, waiting_queue, 
-                                                   served_customers, total_revenue, 
-                                                   refreshments_given, total_refreshments_cost,
-                                                   all_customers, params, eventos_adicionales)
-                    events_log.append(event_record)
             
             elif next_event['type'] == 'REFRIGERIO':
                 customer_id = next_event['customer_id']
@@ -462,7 +464,7 @@ class PeluqueriaVIPSimulator(QMainWindow):
                     refreshments_given += 1
                     total_refreshments_cost += params['costo_refrigerio']
                     
-                    # Registrar evento
+                    # Registrar evento SOLO si se entregó refrigerio
                     eventos_adicionales = {
                         'cliente_refrigerio': customer_id,
                         'costo': params['costo_refrigerio'],
@@ -474,6 +476,7 @@ class PeluqueriaVIPSimulator(QMainWindow):
                                                        refreshments_given, total_refreshments_cost,
                                                        all_customers, params, eventos_adicionales)
                         events_log.append(event_record)
+                # Si el cliente ya no está en cola, el evento de refrigerio se ignora (no se registra)
             
             # Actualizar máximo de clientes en espera
             max_waiting_clients = max(max_waiting_clients, len(waiting_queue))
@@ -517,6 +520,8 @@ class PeluqueriaVIPSimulator(QMainWindow):
             'customer_id': customer['id'],
             'event_num': event_counter
         })
+        
+        return event_counter  # Retornar el contador actualizado
     
     def record_event(self, clock, event, barbers, waiting_queue, served_customers, 
                     total_revenue, refreshments_given, total_refreshments_cost,
@@ -586,25 +591,82 @@ class PeluqueriaVIPSimulator(QMainWindow):
             else:
                 record['veterano_b'] = estado
         
-        # Información detallada de cada cliente en cola
+        # Información detallada SEPARADA: clientes en cola vs clientes siendo atendidos
         total_espera = 0
         clientes_con_refrigerio = 0
         
+        # Crear listas separadas para mejor organización
+        clientes_en_cola = []
+        clientes_siendo_atendidos = []
+        
+        # 1. Clientes en espera (cola)
+        # Verificar duplicados en waiting_queue
+        clientes_ids_en_cola = set()
         for customer in waiting_queue:
+            # Detectar y prevenir duplicados
+            if customer['id'] in clientes_ids_en_cola:
+                print(f"WARNING: Cliente C{customer['id']} duplicado en waiting_queue en evento {event['type']} a tiempo {clock}")
+                continue  # Saltar este duplicado
+            clientes_ids_en_cola.add(customer['id'])
+            
             tiempo_espera = clock - customer['arrival_time']
             total_espera += tiempo_espera
             
+            estado_cliente = "ESPERANDO"
+            peluquero_esperando = barbers[customer['preferred_barber']]['name']
+            
             cliente_info = {
                 'id': customer['id'],
-                'espera': f"{tiempo_espera:.1f}",
+                'estado': estado_cliente,
+                'peluquero_esperando': peluquero_esperando,
                 'refrigerio': "Sí" if customer['got_refreshment'] else "No",
-                'hora_ref': f"{customer.get('refrigerio_time', 'N/A'):.1f}" if isinstance(customer.get('refrigerio_time'), float) else str(customer.get('refrigerio_time', 'N/A'))
+                'hora_ref': f"{customer.get('refrigerio_time', 'N/A'):.1f}" if isinstance(customer.get('refrigerio_time'), float) else str(customer.get('refrigerio_time', 'N/A')),
+                'tiempo_espera': f"{tiempo_espera:.1f}"
             }
             
             if customer['got_refreshment']:
                 clientes_con_refrigerio += 1
             
-            record['clientes'].append(cliente_info)
+            clientes_en_cola.append(cliente_info)
+        
+        # 2. Clientes siendo atendidos
+        clientes_ids_atendidos = set()
+        for barber in barbers:
+            if barber['busy'] and barber['customer']:
+                customer = barber['customer']
+                
+                # Detectar y prevenir duplicados
+                if customer['id'] in clientes_ids_atendidos:
+                    print(f"WARNING: Cliente C{customer['id']} duplicado siendo atendido en evento {event['type']} a tiempo {clock}")
+                    continue  # Saltar este duplicado
+                clientes_ids_atendidos.add(customer['id'])
+                
+                estado_cliente = "SIENDO ATENDIDO"
+                peluquero_atendiendo = barber['name']
+                tiempo_restante_servicio = barber['service_end'] - clock if barber['service_end'] else 0
+                
+                cliente_info = {
+                    'id': customer['id'],
+                    'estado': estado_cliente,
+                    'peluquero_esperando': peluquero_atendiendo,
+                    'refrigerio': "Sí" if customer['got_refreshment'] else "No",
+                    'hora_ref': f"{customer.get('refrigerio_time', 'N/A'):.1f}" if isinstance(customer.get('refrigerio_time'), float) else str(customer.get('refrigerio_time', 'N/A')),
+                    'tiempo_espera': f"{tiempo_restante_servicio:.1f}",  # Para atendidos, mostramos tiempo restante
+                    'tiempo_servicio_total': f"{customer.get('service_time', 'N/A'):.1f}" if customer.get('service_time') else 'N/A'
+                }
+                
+                if customer['got_refreshment']:
+                    clientes_con_refrigerio += 1
+                
+                clientes_siendo_atendidos.append(cliente_info)
+        
+        # Ordenar clientes siendo atendidos por ID para consistencia
+        clientes_siendo_atendidos.sort(key=lambda x: x['id'])
+        # Ordenar clientes en cola por ID para consistencia
+        clientes_en_cola.sort(key=lambda x: x['id'])
+        
+        # Combinar listas: primero los que están siendo atendidos, luego los que esperan
+        record['clientes'] = clientes_siendo_atendidos + clientes_en_cola
         
         # Calcular estadísticas de la cola
         if len(waiting_queue) > 0:
@@ -623,7 +685,7 @@ class PeluqueriaVIPSimulator(QMainWindow):
                    'Próxima Llegada', 'RND Peluquero', 'Peluquero Preferido', 'RND Servicio', 
                    'Tiempo Servicio', 'Aprendiz', 'Veterano A', 'Veterano B', 'Cola', 'Atendidos',
                    'Recaudación', 'Refrigerios', 'Costo Ref', 'Ganancia Neta', 
-                   'Cliente ID', 'Espera', 'Refrigerio', 'Hora Ref']
+                   'Siendo Atendido', 'Esperando en Cola']
         
         self.events_table.setRowCount(len(filtered_events))
         self.events_table.setColumnCount(len(headers))
@@ -674,18 +736,17 @@ class PeluqueriaVIPSimulator(QMainWindow):
             self.events_table.setItem(row, 17, QTableWidgetItem(f"${event['costo_refrigerios']:.2f}"))
             self.events_table.setItem(row, 18, QTableWidgetItem(f"${event['ganancia_neta']:.2f}"))
             
-            # Información de clientes - mostrar solo el primer cliente para no hacer la tabla demasiado ancha
-            if event['clientes']:
-                primer_cliente = event['clientes'][0]
-                self.events_table.setItem(row, 19, QTableWidgetItem(f"C{primer_cliente['id']}"))
-                self.events_table.setItem(row, 20, QTableWidgetItem(primer_cliente['espera']))
-                self.events_table.setItem(row, 21, QTableWidgetItem(primer_cliente['refrigerio']))
-                self.events_table.setItem(row, 22, QTableWidgetItem(primer_cliente['hora_ref']))
-            else:
-                self.events_table.setItem(row, 19, QTableWidgetItem(""))
-                self.events_table.setItem(row, 20, QTableWidgetItem(""))
-                self.events_table.setItem(row, 21, QTableWidgetItem(""))
-                self.events_table.setItem(row, 22, QTableWidgetItem(""))
+            # Separar clientes por estado para mostrar
+            clientes_atendidos = [c for c in event['clientes'] if c['estado'] == 'SIENDO ATENDIDO']
+            clientes_esperando = [c for c in event['clientes'] if c['estado'] == 'ESPERANDO']
+            
+            # Columna: Clientes siendo atendidos
+            atendidos_str = ", ".join([f"C{c['id']}({c['peluquero_esperando']})" for c in clientes_atendidos])
+            self.events_table.setItem(row, 19, QTableWidgetItem(atendidos_str if atendidos_str else "-"))
+            
+            # Columna: Clientes esperando
+            esperando_str = ", ".join([f"C{c['id']}→{c['peluquero_esperando']}" + ("🍺" if c['refrigerio'] == "Sí" else "") for c in clientes_esperando])
+            self.events_table.setItem(row, 20, QTableWidgetItem(esperando_str if esperando_str else "-"))
         
         # Ajustar tamaño de columnas
         header = self.events_table.horizontalHeader()
@@ -908,16 +969,37 @@ Horario de Atención:
                         'Ganancia Neta': format_value(event['ganancia_neta'], 2)
                     }
                     
-                    # Agregar información de clientes (hasta 5 clientes para no hacer la tabla demasiado ancha)
-                    for i, cliente in enumerate(event['clientes'][:5]):
-                        row_data[f'Cliente {i+1} ID'] = f"C{cliente['id']}"
-                        row_data[f'Cliente {i+1} Espera'] = cliente['espera']
-                        row_data[f'Cliente {i+1} Refrigerio'] = cliente['refrigerio']
-                        row_data[f'Cliente {i+1} Hora Ref'] = cliente['hora_ref']
+                    # Crear un mapeo de clientes a columnas
+                    # Los clientes activos (en cola o siendo atendidos) ocupan las columnas de forma secuencial
+                    clientes_activos = event['clientes']
                     
-                    # Si hay más de 5 clientes, agregar un campo para indicarlo
-                    if len(event['clientes']) > 5:
-                        row_data['Clientes Adicionales'] = f"+{len(event['clientes']) - 5} clientes más"
+                    # Eliminar duplicados por ID
+                    clientes_dict = {}
+                    for cliente in clientes_activos:
+                        cliente_id = cliente['id']
+                        if cliente_id not in clientes_dict:
+                            clientes_dict[cliente_id] = cliente
+                    
+                    # Ordenar por ID para asignar columnas de forma consistente
+                    clientes_ordenados = sorted(clientes_dict.values(), key=lambda x: x['id'])
+                    
+                    # Agregar información de hasta 10 clientes en columnas fijas
+                    # Cada cliente ocupa la siguiente columna disponible
+                    for col_num in range(1, 11):
+                        if col_num - 1 < len(clientes_ordenados):
+                            cliente = clientes_ordenados[col_num - 1]
+                            row_data[f'Cliente {col_num} ID'] = f"C{cliente['id']}"
+                            row_data[f'Cliente {col_num} Estado'] = cliente['estado']
+                            row_data[f'Cliente {col_num} Peluquero'] = cliente['peluquero_esperando']
+                            row_data[f'Cliente {col_num} Hora Refrigerio'] = cliente['hora_ref']
+                            row_data[f'Cliente {col_num} Refrigerio'] = cliente['refrigerio']
+                        else:
+                            # Columna vacía (no hay más clientes)
+                            row_data[f'Cliente {col_num} ID'] = ''
+                            row_data[f'Cliente {col_num} Estado'] = ''
+                            row_data[f'Cliente {col_num} Peluquero'] = ''
+                            row_data[f'Cliente {col_num} Hora Refrigerio'] = ''
+                            row_data[f'Cliente {col_num} Refrigerio'] = ''
                     
                     events_data.append(row_data)
                 
